@@ -360,87 +360,104 @@ public class ColdChainService : IColdChainService
             consignment.Status = ConsignmentStatus.InTransit;
         }
 
-        // 4. Dynamically update remaining transit ETA based on latest coordinates and route progress
-        if (consignment.DestLat.HasValue && consignment.DestLng.HasValue)
-        {
-            double remainingMeters = GeoUtils.CalculateDistanceMeters(
-                request.lat,
-                request.lng,
-                consignment.DestLat.Value,
-                consignment.DestLng.Value);
-
-            consignment.RemainingDistanceMeters = remainingMeters;
-
-            // Assume average city/highway speed of 50 km/h = 833.33 meters per minute
-            double metersPerMinute = 833.33;
-            int etaMinutes = (int)Math.Max(1, Math.Ceiling(remainingMeters / metersPerMinute));
-            consignment.EtaMinutes = etaMinutes;
-        }
+        UpdateEta(consignment, request.lat, request.lng);
 
         var incidentsList = _incidents.GetOrAdd(consignment.Id, _ => new List<BreachIncident>());
 
-        // 2. Trigger an alert and set state to Temperature_Breach when temperature stays out of tolerance for 2 consecutive readings
         if (isOutOfTolerance)
         {
-            consignment.ConsecutiveBreachCount += 1;
-
-            if (consignment.ConsecutiveBreachCount >= 2)
-            {
-                consignment.Status = ConsignmentStatus.TemperatureBreach;
-
-                lock (incidentsList)
-                {
-                    var activeIncident = incidentsList.FirstOrDefault(i => i.IsActive);
-                    if (activeIncident == null)
-                    {
-                        activeIncident = new BreachIncident
-                        {
-                            Id = $"INC-{Guid.NewGuid().ToString("N")[..8]}",
-                            ShipmentId = consignment.Id,
-                            StartTimestamp = reading.Timestamp,
-                            PeakTemperatureC = request.temp_c,
-                            IsActive = true
-                        };
-                        incidentsList.Add(activeIncident);
-                    }
-                    else
-                    {
-                        // 3. Log breach incidents with start timestamp, peak temperature, and duration until normalization
-                        if (request.temp_c > consignment.MaxTempC && request.temp_c > activeIncident.PeakTemperatureC)
-                        {
-                            activeIncident.PeakTemperatureC = request.temp_c;
-                        }
-                        else if (request.temp_c < consignment.MinTempC && request.temp_c < activeIncident.PeakTemperatureC)
-                        {
-                            activeIncident.PeakTemperatureC = request.temp_c;
-                        }
-                    }
-                }
-            }
+            HandleBreach(consignment, reading, incidentsList);
         }
         else
         {
-            // Normalized temperature
-            consignment.ConsecutiveBreachCount = 0;
-
-            lock (incidentsList)
-            {
-                var activeIncident = incidentsList.FirstOrDefault(i => i.IsActive);
-                if (activeIncident != null)
-                {
-                    activeIncident.NormalizedTimestamp = reading.Timestamp;
-                    activeIncident.DurationSeconds = Math.Max(1.0, (reading.Timestamp - activeIncident.StartTimestamp).TotalSeconds);
-                    activeIncident.IsActive = false;
-                }
-            }
-
-            if (consignment.Status == ConsignmentStatus.TemperatureBreach)
-            {
-                consignment.Status = ConsignmentStatus.InTransit;
-            }
+            HandleNormalization(consignment, reading, incidentsList);
         }
 
         return reading;
+    }
+
+    private static void UpdateEta(Consignment consignment, double lat, double lng)
+    {
+        if (!consignment.DestLat.HasValue || !consignment.DestLng.HasValue)
+        {
+            return;
+        }
+
+        double remainingMeters = GeoUtils.CalculateDistanceMeters(
+            lat,
+            lng,
+            consignment.DestLat.Value,
+            consignment.DestLng.Value);
+
+        consignment.RemainingDistanceMeters = remainingMeters;
+        const double metersPerMinute = 833.33;
+        int etaMinutes = (int)Math.Max(1, Math.Ceiling(remainingMeters / metersPerMinute));
+        consignment.EtaMinutes = etaMinutes;
+    }
+
+    private static void HandleBreach(Consignment consignment, TelemetryReading reading, List<BreachIncident> incidentsList)
+    {
+        consignment.ConsecutiveBreachCount += 1;
+        if (consignment.ConsecutiveBreachCount < 2)
+        {
+            return;
+        }
+
+        consignment.Status = ConsignmentStatus.TemperatureBreach;
+
+        lock (incidentsList)
+        {
+            var activeIncident = incidentsList.FirstOrDefault(i => i.IsActive);
+            if (activeIncident == null)
+            {
+                activeIncident = new BreachIncident
+                {
+                    Id = $"INC-{Guid.NewGuid().ToString("N")[..8]}",
+                    ShipmentId = consignment.Id,
+                    StartTimestamp = reading.Timestamp,
+                    PeakTemperatureC = reading.TempC,
+                    IsActive = true
+                };
+                incidentsList.Add(activeIncident);
+            }
+            else
+            {
+                UpdatePeakTemperature(consignment, activeIncident, reading.TempC);
+            }
+        }
+    }
+
+    private static void UpdatePeakTemperature(Consignment consignment, BreachIncident activeIncident, double tempC)
+    {
+        if (tempC > consignment.MaxTempC && tempC > activeIncident.PeakTemperatureC)
+        {
+            activeIncident.PeakTemperatureC = tempC;
+        }
+        else if (tempC < consignment.MinTempC && tempC < activeIncident.PeakTemperatureC)
+        {
+            activeIncident.PeakTemperatureC = tempC;
+        }
+    }
+
+    private static void HandleNormalization(Consignment consignment, TelemetryReading reading, List<BreachIncident> incidentsList)
+    {
+        consignment.ConsecutiveBreachCount = 0;
+
+        lock (incidentsList)
+        {
+            var activeIncident = incidentsList.FirstOrDefault(i => i.IsActive);
+            if (activeIncident != null)
+            {
+                activeIncident.NormalizedTimestamp = reading.Timestamp;
+                activeIncident.DurationSeconds = Math.Max(1.0, (reading.Timestamp - activeIncident.StartTimestamp).TotalSeconds);
+                activeIncident.IsActive = false;
+            }
+        }
+
+        if (consignment.Status == ConsignmentStatus.TemperatureBreach)
+        {
+            consignment.Status = ConsignmentStatus.InTransit;
+        }
     }
 
     public IReadOnlyList<TelemetryReading> GetTelemetryHistory(string shipmentId)
@@ -551,18 +568,7 @@ public class ColdChainService : IColdChainService
         }
 
         // 2. Verify 6-digit OTP; lock submission after 3 failed verification attempts
-        if (string.IsNullOrWhiteSpace(consignment.CurrentOtp) ||
-            !string.Equals(consignment.CurrentOtp.Trim(), request.OtpCode?.Trim(), StringComparison.Ordinal))
-        {
-            consignment.FailedOtpAttempts += 1;
-            if (consignment.FailedOtpAttempts >= 3)
-            {
-                consignment.IsLocked = true;
-                consignment.Status = ConsignmentStatus.DeliveryLocked;
-                throw new InvalidOperationException("Delivery submission locked: 3 failed OTP verification attempts.");
-            }
-            throw new ArgumentException($"Invalid OTP code. {3 - consignment.FailedOtpAttempts} verification attempt(s) remaining.");
-        }
+        VerifyOtp(consignment, request.OtpCode);
 
         // 3. Capture digital signature as vector path or base64 image along with recipient name and job title
         if (string.IsNullOrWhiteSpace(request.SignatureData))
@@ -610,5 +616,21 @@ public class ColdChainService : IColdChainService
     {
         _podReceipts.TryGetValue(shipmentId, out var pod);
         return pod;
+    }
+
+    private static void VerifyOtp(Consignment consignment, string? otpCode)
+    {
+        if (string.IsNullOrWhiteSpace(consignment.CurrentOtp) ||
+            !string.Equals(consignment.CurrentOtp.Trim(), otpCode?.Trim(), StringComparison.Ordinal))
+        {
+            consignment.FailedOtpAttempts += 1;
+            if (consignment.FailedOtpAttempts >= 3)
+            {
+                consignment.IsLocked = true;
+                consignment.Status = ConsignmentStatus.DeliveryLocked;
+                throw new InvalidOperationException("Delivery submission locked: 3 failed OTP verification attempts.");
+            }
+            throw new ArgumentException($"Invalid OTP code. {3 - consignment.FailedOtpAttempts} verification attempt(s) remaining.");
+        }
     }
 }

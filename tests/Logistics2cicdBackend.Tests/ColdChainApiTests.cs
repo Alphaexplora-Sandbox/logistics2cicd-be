@@ -340,6 +340,13 @@ public class ColdChainApiTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal(12.8, activeIncident.PeakTemperatureC);
         Assert.True(activeIncident.IsActive);
 
+        // 3b reading: higher temperature (15.5°C) to update peak temperature
+        var t3b = new IngestTelemetryRequest(consignment.Id, 47.6092, -122.3303, 15.5, DateTimeOffset.UtcNow.AddMinutes(1));
+        await client.PostAsJsonAsync("/api/v1/telemetry/ingest", t3b);
+        incidents = await client.GetFromJsonAsync<List<BreachIncident>>("/api/v1/incidents");
+        activeIncident = Assert.Single(incidents!, i => i.ShipmentId == consignment.Id);
+        Assert.Equal(15.5, activeIncident.PeakTemperatureC);
+
         // 4th reading: Normalized temperature (5.0°C) -> incident normalized and duration computed
         var t4 = new IngestTelemetryRequest(consignment.Id, 47.6095, -122.3302, 5.0, DateTimeOffset.UtcNow.AddMinutes(2));
         await client.PostAsJsonAsync("/api/v1/telemetry/ingest", t4);
@@ -352,6 +359,19 @@ public class ColdChainApiTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.False(resolvedIncident.IsActive);
         Assert.NotNull(resolvedIncident.DurationSeconds);
         Assert.True(resolvedIncident.DurationSeconds > 0);
+
+        // Cold breach test: sub-zero temperatures (-2.0°C then -5.0°C)
+        var tCold1 = new IngestTelemetryRequest(consignment.Id, 47.6095, -122.3302, -2.0, DateTimeOffset.UtcNow.AddMinutes(3));
+        await client.PostAsJsonAsync("/api/v1/telemetry/ingest", tCold1);
+        var tCold2 = new IngestTelemetryRequest(consignment.Id, 47.6095, -122.3302, -3.0, DateTimeOffset.UtcNow.AddMinutes(4));
+        await client.PostAsJsonAsync("/api/v1/telemetry/ingest", tCold2);
+        var tCold3 = new IngestTelemetryRequest(consignment.Id, 47.6095, -122.3302, -5.0, DateTimeOffset.UtcNow.AddMinutes(5));
+        await client.PostAsJsonAsync("/api/v1/telemetry/ingest", tCold3);
+
+        var coldIncidents = await client.GetFromJsonAsync<List<BreachIncident>>("/api/v1/incidents");
+        var coldActive = coldIncidents!.FirstOrDefault(i => i.ShipmentId == consignment.Id && i.IsActive);
+        Assert.NotNull(coldActive);
+        Assert.Equal(-5.0, coldActive!.PeakTemperatureC);
     }
 
     // =========================================================================

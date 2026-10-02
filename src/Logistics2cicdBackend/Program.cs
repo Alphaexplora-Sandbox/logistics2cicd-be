@@ -1,3 +1,4 @@
+using Logistics2cicdBackend;
 using Logistics2cicdBackend.Domain;
 using Logistics2cicdBackend.Services;
 
@@ -181,14 +182,17 @@ app.MapGet("/api/v1/consignments/{id}/pod", (string id, IColdChainService servic
 }).Produces<PodReceipt>(StatusCodes.Status200OK)
   .Produces(StatusCodes.Status404NotFound);
 
-app.Run();
+await app.RunAsync();
 
-public record HealthResponse(string Status, string Service);
-
-public static class ServiceInfo
+namespace Logistics2cicdBackend
 {
-    public const string Name = "logistics2cicd-backend";
-}
+    public record HealthResponse(string Status, string Service);
 
-// Exposed so the test project can host the application in memory.
-public partial class Program;
+    public static class ServiceInfo
+    {
+        public const string Name = "logistics2cicd-backend";
+    }
+
+    // Exposed so the test project can host the application in memory.
+    public partial class Program;
+}
