@@ -1,5 +1,6 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+ENV CI=true
 COPY . .
 RUN dotnet restore
 RUN dotnet publish src/Logistics2cicdBackend/Logistics2cicdBackend.csproj --configuration Release --no-restore --output /app/publish
